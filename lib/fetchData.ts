@@ -127,7 +127,14 @@ const BASIN_SPECIES_MAP: Record<string, string> = {
 // ============================================================
 export interface DailyRow {
   date: string;        // YYYY-MM-DD
-  chinook: number;     // Chin column (total chinook)
+  // The "Chin" column is a single count whose run is told apart only by
+  // the separate "Chinook Run" column (Sp/Su/Fa) on the same row — DART
+  // does not report concurrent per-run counts. Split here at parse time
+  // so every downstream consumer gets the run that was actually reported,
+  // instead of every day's count defaulting into one bucket.
+  chinookSpring: number;
+  chinookSummer: number;
+  chinookFall: number;
   steelhead: number;   // Stlhd column
   steelheadWild: number;
   sockeye: number;
@@ -215,6 +222,7 @@ function parseDailyCSV(text: string): DailyRow[] {
   const headerCols = lines[headerIdx].split(",").map(h => h.trim());
   const iOf = (name: string) => headerCols.indexOf(name);
 
+  const iChinookRun = iOf("Chinook Run");
   const iChin       = iOf("Chin");
   const iStlhd      = iOf("Stlhd");
   const iWStlhd     = iOf("WStlhd");
@@ -251,6 +259,7 @@ function parseDailyCSV(text: string): DailyRow[] {
     const dateRaw = cols[1]?.trim();
     if (!dateRaw?.match(/^\d{4}-\d{2}-\d{2}$/)) continue;
 
+    const chinookRunRaw = rawAt(cols, iChinookRun);
     const chinRaw       = rawAt(cols, iChin);
     const stlhdRaw      = rawAt(cols, iStlhd);
     const wstlhdRaw     = rawAt(cols, iWStlhd);
@@ -263,7 +272,17 @@ function parseDailyCSV(text: string): DailyRow[] {
     const chumRaw       = rawAt(cols, iChum);
     const pinkRaw       = rawAt(cols, iPink);
 
-    const chinook       = parseNum(chinRaw);
+    // DART reports one Chinook count per day, tagged with which run it
+    // belongs to in the separate "Chinook Run" column ("Sp"/"Su"/"Fa") —
+    // it is NOT three concurrent counts. Route that day's count into the
+    // matching bucket instead of always treating it as Spring. A handful
+    // of stray winter fish sometimes post with a blank run label before
+    // DART formally opens the spring window — those are conventionally
+    // attributed to the oncoming spring run, same as DART's own reporting.
+    const chinCount = parseNum(chinRaw);
+    const chinookSpring = chinookRunRaw === "Su" || chinookRunRaw === "Fa" ? 0 : chinCount;
+    const chinookSummer = chinookRunRaw === "Su" ? chinCount : 0;
+    const chinookFall   = chinookRunRaw === "Fa" ? chinCount : 0;
     const steelhead     = parseNum(stlhdRaw);
     const steelheadWild = parseNum(wstlhdRaw);
     const sockeye       = parseNum(sockRaw);
@@ -279,7 +298,7 @@ function parseDailyCSV(text: string): DailyRow[] {
     const tempC = parseFloat2(rawAt(cols, iTempC));
     const tempF = tempC !== null ? Math.round(tempC * 9 / 5 + 32) : null;
 
-    const total = chinook + steelhead + sockeye + coho + shad + lamprey + chum + pink;
+    const total = chinookSpring + chinookSummer + chinookFall + steelhead + sockeye + coho + shad + lamprey + chum + pink;
 
     // A row is "reported" if at least one count column is non-blank.
     // DART often posts placeholder rows for the most recent 1-4 days
@@ -292,7 +311,7 @@ function parseDailyCSV(text: string): DailyRow[] {
     ].some(v => v !== undefined && v !== "" && v !== "NA");
 
     rows.push({
-      date: dateRaw, chinook, steelhead, steelheadWild,
+      date: dateRaw, chinookSpring, chinookSummer, chinookFall, steelhead, steelheadWild,
       sockeye, coho, shad, lamprey, chum, pink,
       tempC, tempF, total, hasData,
     });
@@ -367,7 +386,9 @@ async function fetchDailyForDam(
 
     const avg3day: DailyRow = {
       date:          latest.date,
-      chinook:       avg("chinook"),
+      chinookSpring: avg("chinookSpring"),
+      chinookSummer: avg("chinookSummer"),
+      chinookFall:   avg("chinookFall"),
       steelhead:     avg("steelhead"),
       steelheadWild: avg("steelheadWild"),
       sockeye:       avg("sockeye"),
@@ -382,7 +403,7 @@ async function fetchDailyForDam(
       hasData:       true,
     };
 
-    console.log(`adult_daily ${projectCode}: latest=${latest.date} stlhd=${latest.steelhead} chin=${latest.chinook} avg3_stlhd=${avg3day.steelhead}`);
+    console.log(`adult_daily ${projectCode}: latest=${latest.date} stlhd=${latest.steelhead} chinSp=${latest.chinookSpring} chinSu=${latest.chinookSummer} chinFa=${latest.chinookFall} avg3_stlhd=${avg3day.steelhead}`);
 
     return {
       latest,
@@ -822,7 +843,9 @@ export async function fetchAllConditions() {
       const hasDailyData = !!daily;
       const latestDate   = daily?.dataThrough ?? basinThrough ?? "";
 
-      const dailyChinook    = daily?.latest.chinook   ?? 0;
+      const dailyChinookSpring = daily?.latest.chinookSpring ?? 0;
+      const dailyChinookSummer = daily?.latest.chinookSummer ?? 0;
+      const dailyChinookFall   = daily?.latest.chinookFall   ?? 0;
       const dailySteelhead  = daily?.latest.steelhead ?? 0;
       const dailyCoho       = daily?.latest.coho      ?? 0;
       const dailySockeye    = daily?.latest.sockeye   ?? 0;
@@ -830,12 +853,15 @@ export async function fetchAllConditions() {
       const dailyLamprey    = daily?.latest.lamprey   ?? 0;
       const dailyChum       = daily?.latest.chum      ?? 0;
       const dailyPink       = daily?.latest.pink      ?? 0;
-      const dailyTotal      = dailyChinook + dailySteelhead + dailyCoho +
+      const dailyTotal      = dailyChinookSpring + dailyChinookSummer + dailyChinookFall +
+                              dailySteelhead + dailyCoho +
                               dailySockeye + dailyShad + dailyLamprey +
                               dailyChum + dailyPink;
 
       // ── 3-DAY AVERAGES ──
-      const avg3Chinook    = daily?.avg3day.chinook   ?? 0;
+      const avg3ChinookSpring = daily?.avg3day.chinookSpring ?? 0;
+      const avg3ChinookSummer = daily?.avg3day.chinookSummer ?? 0;
+      const avg3ChinookFall   = daily?.avg3day.chinookFall   ?? 0;
       const avg3Steelhead  = daily?.avg3day.steelhead ?? 0;
       const avg3Coho       = daily?.avg3day.coho      ?? 0;
       const avg3Sockeye    = daily?.avg3day.sockeye   ?? 0;
@@ -843,7 +869,8 @@ export async function fetchAllConditions() {
       const avg3Lamprey    = daily?.avg3day.lamprey   ?? 0;
       const avg3Chum       = daily?.avg3day.chum      ?? 0;
       const avg3Pink       = daily?.avg3day.pink      ?? 0;
-      const avg3Total      = avg3Chinook + avg3Steelhead + avg3Coho +
+      const avg3Total      = avg3ChinookSpring + avg3ChinookSummer + avg3ChinookFall +
+                             avg3Steelhead + avg3Coho +
                              avg3Sockeye + avg3Shad + avg3Lamprey +
                              avg3Chum + avg3Pink;
 
@@ -872,9 +899,9 @@ export async function fetchAllConditions() {
         hasBasinData:  !!basin,
 
         // Daily counts — TRUE daily from adult_daily.php
-        chinookSpring: dailyChinook,
-        chinookSummer: 0,
-        chinookFall:   0,
+        chinookSpring: dailyChinookSpring,
+        chinookSummer: dailyChinookSummer,
+        chinookFall:   dailyChinookFall,
         coho:          dailyCoho,
         sockeye:       dailySockeye,
         steelhead:     dailySteelhead,
@@ -885,9 +912,9 @@ export async function fetchAllConditions() {
         fishCount:     dailyTotal,
 
         // 3-day averages
-        avg3day_chinookSpring: avg3Chinook,
-        avg3day_chinookSummer: 0,
-        avg3day_chinookFall:   0,
+        avg3day_chinookSpring: avg3ChinookSpring,
+        avg3day_chinookSummer: avg3ChinookSummer,
+        avg3day_chinookFall:   avg3ChinookFall,
         avg3day_coho:          avg3Coho,
         avg3day_sockeye:       avg3Sockeye,
         avg3day_steelhead:     avg3Steelhead,
@@ -898,9 +925,9 @@ export async function fetchAllConditions() {
         avg3day_total:         avg3Total,
 
         // Keep max3day as alias for avg3day (backward compat)
-        max3day_chinookSpring: avg3Chinook,
-        max3day_chinookSummer: 0,
-        max3day_chinookFall:   0,
+        max3day_chinookSpring: avg3ChinookSpring,
+        max3day_chinookSummer: avg3ChinookSummer,
+        max3day_chinookFall:   avg3ChinookFall,
         max3day_coho:          avg3Coho,
         max3day_sockeye:       avg3Sockeye,
         max3day_steelhead:     avg3Steelhead,
