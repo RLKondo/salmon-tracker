@@ -196,6 +196,7 @@ export interface Dam3DayCounts {
 // ============================================================
 function parseDailyCSV(text: string): DailyRow[] {
   const rows: DailyRow[] = [];
+  const warnedChinookRuns = new Set<string>();
 
   // Check if we got HTML instead of CSV (blocked)
   if (text.trimStart().startsWith("<")) {
@@ -280,9 +281,30 @@ function parseDailyCSV(text: string): DailyRow[] {
     // DART formally opens the spring window — those are conventionally
     // attributed to the oncoming spring run, same as DART's own reporting.
     const chinCount = parseNum(chinRaw);
-    const chinookSpring = chinookRunRaw === "Su" || chinookRunRaw === "Fa" ? 0 : chinCount;
-    const chinookSummer = chinookRunRaw === "Su" ? chinCount : 0;
-    const chinookFall   = chinookRunRaw === "Fa" ? chinCount : 0;
+    let chinookSpring = 0, chinookSummer = 0, chinookFall = 0;
+    if (chinookRunRaw === "Su") {
+      chinookSummer = chinCount;
+    } else if (chinookRunRaw === "Fa") {
+      chinookFall = chinCount;
+    } else if (!chinookRunRaw || chinookRunRaw === "Sp") {
+      chinookSpring = chinCount;
+    } else {
+      // DART has changed these codes on this project before (see the
+      // PRD/LWG project-code note above) — an unrecognized, non-blank
+      // run label means the format shifted again. Default to spring so
+      // the fish are at least counted somewhere, but warn loudly instead
+      // of silently repeating the exact bug this replaced. One warning
+      // per unique unrecognized value, per dam, per fetch — not per row.
+      if (!warnedChinookRuns.has(chinookRunRaw)) {
+        warnedChinookRuns.add(chinookRunRaw);
+        console.error(
+          `adult_daily: unrecognized "Chinook Run" value "${chinookRunRaw}" — ` +
+          `expected "Sp", "Su", "Fa", or blank. DART may have changed its run ` +
+          `codes again; this count is defaulting to Spring until fetchData.ts is updated.`
+        );
+      }
+      chinookSpring = chinCount;
+    }
     const steelhead     = parseNum(stlhdRaw);
     const steelheadWild = parseNum(wstlhdRaw);
     const sockeye       = parseNum(sockRaw);
